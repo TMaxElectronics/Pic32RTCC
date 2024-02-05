@@ -232,7 +232,7 @@ uint32_t RTCC_getTimeString(char * buffer, RTC_TIME_FORMAT_t format){
         case RTCC_FORMAT_HM:
             return sprintf(buffer, "%02d:%02d", RTCC_getHours(), RTCC_getMinutes());
         case RTCC_FORMAT_HMS:
-            return sprintf(buffer, "%02d:%02d:%02d", RTCC_getHours(), RTCC_getMinutes(), RTCC_getSeconds());
+            return sprintf(buffer, "%02d-%02d-%02d", RTCC_getHours(), RTCC_getMinutes(), RTCC_getSeconds());
         case RTCC_FORMAT_12H_HM:
             return sprintf(buffer, "%02d:%02d %s", RTCC_getHours() % 12, RTCC_getMinutes(), (RTCC_getHours() / 12) ? "PM" : "AM");
         case RTCC_FORMAT_12H_HMS:
@@ -248,13 +248,13 @@ uint32_t RTCC_getDateString(char * buffer, RTC_TIME_FORMAT_t format){
 #ifdef DATE_FORMAT_EUROPEAN
             return sprintf(buffer, "%02d.%02d.%02d", RTCC_getDay(), RTCC_getMonth(), RTCC_getYear() - 2000);
 #else
-            return sprintf(buffer, "%02d.%02d.%02d", RTCC_getMonth(), RTCC_getDay(), RTCC_getYear() - 2000);
+            return sprintf(buffer, "%02d-%02d-%02d", RTCC_getMonth(), RTCC_getDay(), RTCC_getYear() - 2000);
 #endif
         case RTCC_FORMAT_DMYY:
 #ifdef DATE_FORMAT_EUROPEAN
             return sprintf(buffer, "%02d.%02d.%04d", RTCC_getDay(), RTCC_getMonth(), RTCC_getYear());
 #else
-            return sprintf(buffer, "%02d.%02d.%04d", RTCC_getMonth(), RTCC_getDay(), RTCC_getYear());
+            return sprintf(buffer, "%02d-%02d-%04d", RTCC_getMonth(), RTCC_getDay(), RTCC_getYear());
 #endif
         case RTCC_FORMAT_MONTHDYY:
 #ifdef DATE_FORMAT_EUROPEAN
