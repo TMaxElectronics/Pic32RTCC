@@ -7,7 +7,9 @@
 #include "RTCC.h"
 #include "ConMan.h"
 #include "FreeRTOSConfig.h"
-#include "System.h" 
+#include "System.h"
+#include "util.h"
+#include "startup.h" 
 
 
 #if __has_include("TTerm.h")
@@ -27,6 +29,7 @@ static uint32_t RTCC_lastCalDate = RTCC_PARAM_LASTCALDATE_DEF;
 const static char * RTCC_weekdayNames[7] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 const static char * RTCC_monthNames[12] = {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"};
 
+static uint32_t RTCC_calNotRecommended = 0;
 static void RTCC_unlockRegisters();
 static void RTCC_lockRegisters();
 static ConMan_Result_t RTCC_configCallback(ConMan_Result_t evt, ConMan_CallbackData_t * data);
@@ -44,13 +47,23 @@ static uint8_t RTCC_cmd(TERMINAL_HANDLE * handle, uint8_t argCount, char ** args
         if(strcmp(args[currArg], "-?") == 0){
             ttprintf("Contains avrious utilities for getting and setting system time\r\n");
             ttprintf("usage:\r\n");
-            ttprintf("\ttime [options {arguments}]  \t prints out current system time and date");
+            ttprintf("\ttime [options {arguments}]  \t prints out current system time and date\r\n");
             ttprintf("\t\t-cal                      \t Enables drift calibration for setting the time\r\n");
             ttprintf("\t\t-st {time string}         \t Sets the time. Required format=\"hh:mm:ss\"\r\n");
-            //ttprintf("\t\t-sd {date string}         \t Sets the date. Required format=\"hh:mm:ss\"\r\n");
+            ttprintf("\t\t-sd {date string}         \t Sets the date. Required format=\"hh:mm:ss\"\r\n");
             ttprintf("\t\t-se {epoch time}          \t Sets time and date from epoch timestamp\r\n");
             ttprintf("\t\t-e                        \t prints epoch time\r\n");
             return TERM_CMD_EXIT_SUCCESS;
+        }else if(strcmp(args[currArg], "-p") == 0){
+            ttprintf("System compile date & time: t=\"%s\" d=\"%s\"\r\n", __TIME__, __DATE__);
+            
+            struct tm info;
+    
+            RTCC_strptime(__TIME__, &info);
+            RTCC_strpdateStr(__DATE__, &info);
+            
+            ttprintf("=%d\r\n", mktime(&info));
+            
         }else if(strcmp(args[currArg], "-cal") == 0){
             cal = 1;
         }else if(strcmp(args[currArg], "-st") == 0){
@@ -76,19 +89,36 @@ static uint8_t RTCC_cmd(TERMINAL_HANDLE * handle, uint8_t argCount, char ** args
         }
     }
     
+    struct tm newTime;
+    uint32_t updateRequired = 0;
+    
     if(setTime != 0){
-        RTCC_setTimeString(args[setTime], cal);
-        ttprintf("updated system time%s\r\n", cal ? " and calibrated for drift" : "");
+        RTCC_strptime(args[setTime], &newTime);
+        updateRequired = 1;
     }
     
     if(setDate != 0){
-        RTCC_setDateStringChar(args[setTime]);
-        ttprintf("updated system date\r\n");
+        RTCC_strpdateNum(args[setDate], &newTime);
+        updateRequired = 1;
     }
     
     if(setEpoch != 0){
-        ttprintf("Setting Epoch is not yet supported\r\n");
+        uint32_t epoch = atoi(args[setEpoch]);
+        if(epoch != 0){
+            if((setDate != 0) || (setTime != 0)){
+                ttprintf("both numerical and epoch time update requested, only writing epoch\r\n");
+            }
+            memcpy(&newTime, localtime(&epoch), sizeof (struct tm));
+            updateRequired = 1;
+        }else{
+            ttprintf("invalid epoch value string entered\r\n");
+        }
     }
+    
+    if(updateRequired){
+        RTCC_setTm(&newTime, (setTime != 0) || (setEpoch != 0), (setDate != 0) || (setEpoch != 0), cal);
+        ttprintf("updated system time\r\n");
+    }   
     
     if(cal && !setTime && !setDate && !setEpoch){
         ttprintf("Tuning value = %i (actually %i)\r\n", RTCC_calibration, RTCCONbits.CAL);
@@ -106,7 +136,7 @@ static uint8_t RTCC_cmd(TERMINAL_HANDLE * handle, uint8_t argCount, char ** args
 #endif
 
 void RTCC_init(char * defaultTimeString, char * defaultDateString){ 
-    ConMan_addParameter("RTCC_CAL", sizeof(uint32_t), RTCC_configCallback, (void*) RTCC_PARAM_CALIBRATION, RTCC_VERSION);
+    ConMan_addParameter("RTCC_CAL", sizeof(int32_t), RTCC_configCallback, (void*) RTCC_PARAM_CALIBRATION, RTCC_VERSION);
     ConMan_addParameter("RTCC_CALDATE", sizeof(uint32_t), RTCC_configCallback, (void*) RTCC_PARAM_LASTCALDATE, RTCC_VERSION);
     
     RTCC_unlockRegisters();
@@ -116,11 +146,26 @@ void RTCC_init(char * defaultTimeString, char * defaultDateString){
     
     RTCC_lockRegisters();
     
-    RTCC_setTimeString(defaultTimeString, 0);
-    RTCC_setDateStringChar(defaultDateString);
+    //now check if the last reset even was either a power on reset or a brown out reset. That would make the registers potentially wrong
+    if(SYS_resetCause & (_RCON_BOR_MASK || _RCON_POR_MASK)){
+        //yes, reset time to a default value
+        struct tm newTime;
+        if(RTCC_lastCalDate != 0){
+            //lastCalDate has a valid date in it, just use that
+            memcpy(&newTime, localtime(&RTCC_lastCalDate), sizeof (struct tm));
+        }else{
+            //not even lastCalDate is valid... use the defaultStringsstruct tm info;
+            RTCC_strptime(defaultTimeString, &newTime);
+            RTCC_strpdateStr(defaultDateString, &newTime);
+        }
+        RTCC_setTm(&newTime, 1, 1, 0);
+        
+        //make sure at least the next time update won't try a calibration, even if it is requested
+        RTCC_calNotRecommended = 0;
+    }
     
 #if __has_include("TTerm.h")
-    TERM_addCommand(RTCC_cmd, "time", "system time functions", configMINIMAL_STACK_SIZE + 250, &TERM_defaultList);
+    TERM_addCommand(RTCC_cmd, "time", "system time functions", configMINIMAL_STACK_SIZE + 500, &TERM_defaultList);
 #endif
 }
 
@@ -138,8 +183,12 @@ static ConMan_Result_t RTCC_configCallback(ConMan_Result_t evt, ConMan_CallbackD
         }
     }else if(evt == CONFIG_ENTRY_LOADED || evt == CONFIG_ENTRY_UPDATED){
         //a configuration was just updated, reload data
-        if((uint32_t) cbd->userData == RTCC_PARAM_CALIBRATION){         ConMan_readData(cbd->callbackData, 0, (uint8_t*) (uint8_t*) &RTCC_calibration, sizeof(uint32_t));
-        }else if((uint32_t) cbd->userData == RTCC_PARAM_LASTCALDATE){   ConMan_readData(cbd->callbackData, 0, (uint8_t*) (uint8_t*) &RTCC_lastCalDate, sizeof(uint32_t));
+        if((uint32_t) cbd->userData == RTCC_PARAM_CALIBRATION){         
+            ConMan_readData(cbd->callbackData, 0, (uint8_t*) (uint8_t*) &RTCC_calibration, sizeof(uint32_t));
+            
+            //TODO write cal value to register
+        }else if((uint32_t) cbd->userData == RTCC_PARAM_LASTCALDATE){   
+            ConMan_readData(cbd->callbackData, 0, (uint8_t*) (uint8_t*) &RTCC_lastCalDate, sizeof(uint32_t));
         }
     }else if(evt == CONFIG_VERIFY_VALUE){
         //unimplemented for now
@@ -191,19 +240,9 @@ uint32_t RTCC_getMonth(){
     return (RTCDATEbits.MONTH10 * 10) + RTCDATEbits.MONTH01;
 }
 
-void RTCC_getDateAndTime(struct tm * info){
-    info->tm_year = RTCC_getYear() - 1900;
-    info->tm_mon = RTCC_getMonth();
-    info->tm_mday = RTCC_getDay()+1;
-    info->tm_hour = RTCC_getHours();
-    info->tm_min = RTCC_getMinutes();
-    info->tm_sec = RTCC_getSeconds();
-    info->tm_isdst = 0;
-}
-
 uint32_t RTCC_getEpoch(){
     struct tm info;
-    RTCC_getDateAndTime(&info);
+    RTCC_getTm(&info);
     return mktime(&info);
 }
 
@@ -269,8 +308,7 @@ uint32_t RTCC_getDateString(char * buffer, RTC_TIME_FORMAT_t format){
     }
 }
 
-void RTCC_setTime(uint32_t hours, uint32_t minutes, uint32_t seconds, unsigned calibrate){
-    
+void RTCC_setTime(uint32_t hours, uint32_t minutes, uint32_t seconds){
     if(hours > 23 || minutes > 59 || seconds > 59) return;
     
     //pre-calculate register value to prevent clocking during writing messing with us
@@ -302,13 +340,6 @@ void RTCC_setTime(uint32_t hours, uint32_t minutes, uint32_t seconds, unsigned c
     RTCC_unlockRegisters();
     RTCTIME = time.w;
     RTCC_lockRegisters();
-    
-    //TODO implement drift calibration
-    
-    TERM_printDebug(TERM_handle, "got new time: %d:%d:%d\r\n", hours, minutes, seconds);
-    
-    uint32_t caltime = RTCC_getEpoch();
-    ConMan_updateParameter("RTCC_CALDATE", 0, (void*) &caltime, sizeof(uint32_t), RTCC_VERSION);
 }
 
 void RTCC_setDate(uint8_t day, uint8_t month, uint8_t year){//pre-calculate register value to prevent clocking during writing messing with us
@@ -347,106 +378,122 @@ void RTCC_setDate(uint8_t day, uint8_t month, uint8_t year){//pre-calculate regi
     RTCC_lockRegisters();
 } 
 
-void RTCC_setTimeString(char* newTime, unsigned calibrate){
-    //TODO upgrade this to something more reasonable :3
-    uint32_t hours = (newTime[0] - 48) * 10 + (newTime[1] - 48);
-    uint32_t minutes = (newTime[3] - 48) * 10 + (newTime[4] - 48);
-    uint32_t seconds = (newTime[6] - 48) * 10 + (newTime[7] - 48);
-    
-    RTCC_setTime(hours, minutes, seconds, calibrate);
-}
- 
-void RTCC_setDateStringNum(char* newDate){
-    uint8_t year = (newDate[2] - 48) * 10 + (newDate[3] - 48);
-    uint8_t month = (newDate[5] - 48) * 10 + (newDate[6] - 48);
-    uint8_t day = (newDate[8] - 48) * 10 + (newDate[9] - 48);
-    
-    RTCC_setDate(day, month, year);
+void RTCC_getTm(struct tm * info){
+    info->tm_year = RTCC_getYear() - 1900;
+    info->tm_mon = RTCC_getMonth()-1;
+    info->tm_mday = RTCC_getDay();
+    info->tm_hour = RTCC_getHours();
+    info->tm_min = RTCC_getMinutes();
+    info->tm_sec = RTCC_getSeconds();
+    info->tm_isdst = 0;
 }
 
-void RTCC_setDateStringChar(char* newDate){
-    RTCC_unlockRegisters();
+void RTCC_setTm(struct tm * info, uint32_t updateTime, uint32_t updateDate, unsigned calibrate){
+    //does the user want to calibrate and a lastCalDate set?
+    if(!RTCC_calNotRecommended && calibrate && RTCC_lastCalDate != 0){
+        //yes, calculate the drift factor (no, not the initial d type)
+        
+        //how long ago do we think the last cal happened?
+        int32_t tInt = RTCC_getEpoch() - RTCC_lastCalDate;
+        
+        //how long ago do the last cal actually happen?
+        int32_t tRef = mktime(info) - RTCC_lastCalDate;
+        
+        if(tInt != 0 && tRef > 0){
+            
+            //calculate by how much our internal clock deviated... and yes do it in floting point math because i don't hate myself
+            float factor = (float) tRef / (float) tInt;
+
+            //convert back to the calibration constant for the register. Factor = clocksPerMinute / (clocksPerMinute+x) with clocksPerMinute = 32768*60 = 1966080
+            int32_t calibrationValue = (int16_t) (((1/factor)-1) * 1966080.0);
+
+            TERM_printDebug(TERM_handle, "RTCC calibration: tInt=%d tRef=%d drift=%dppm newCalFactor=%d ", tInt, tRef, (int32_t) ((factor - 1.0) * 1000000.0), calibrationValue);
+
+            //did enough time pass since calibration? To make sure we don't mis-calibrate we'll only accept it after at least an hour has passed
+            if(tRef > 3600){
+                ConMan_updateParameter("RTCC_CAL", 0, &calibrationValue, sizeof(int32_t), RTCC_VERSION);
+            }
+        }
+    }
     
+    if(updateTime) RTCC_setTime(info->tm_hour, info->tm_min, info->tm_sec);
+    if(updateDate) RTCC_setDate(info->tm_mday, info->tm_mon + 1, info->tm_year - 100);
+    
+    uint32_t caltime = mktime(info);
+    //only update if both date and time are written
+    if(updateTime && updateDate) ConMan_updateParameter("RTCC_CALDATE", 0, (uint8_t*) &caltime, sizeof(uint32_t), RTCC_VERSION);
+    RTCC_calNotRecommended = 0;
+}
+
+//must be formatted as hh:mm:ss
+void RTCC_strptime(char * newTime, struct tm * info){
+    uint8_t hours = ((isAsciiNumber(newTime[0]) ? (newTime[0] - 48) : 0) * 10) + (newTime[1] - 48);
+    uint8_t minutes = ((isAsciiNumber(newTime[3]) ? (newTime[3] - 48) : 0) * 10) + (newTime[4] - 48);
+    uint8_t seconds = ((isAsciiNumber(newTime[6]) ? (newTime[6] - 48) : 0) * 10) + (newTime[7] - 48);
+    
+    info->tm_hour = hours;
+    info->tm_min = minutes;
+    info->tm_sec = seconds;
+    info->tm_isdst = 0;
+}
+
+//must be formatted as either dd.mm.yy (not yet implemented:) or mm.dd.yy depending on locale
+void RTCC_strpdateNum(char * newDate, struct tm * info){
+    uint8_t day = ((isAsciiNumber(newDate[0]) ? (newDate[0] - 48) : 0) * 10) + (newDate[1] - 48);
+    uint8_t month = ((isAsciiNumber(newDate[3]) ? (newDate[3] - 48) : 0) * 10) + (newDate[4] - 48);
+    uint8_t year = ((isAsciiNumber(newDate[6]) ? (newDate[6] - 48) : 0) * 10) + (newDate[7] - 48);
+    
+    info->tm_mday = day;
+    info->tm_mon = month - 1;
+    info->tm_year = year + 100;
+    info->tm_wday = (day += month < 3 ? year-- : year - 2, 23*month/9 + day + 4 + year/4- year/100 + year/400)%7;
+}
+
+//must be formatted as Mon dd yyyy
+void RTCC_strpdateStr(char * newDate, struct tm * info){
+    uint32_t day = ((isAsciiNumber(newDate[4]) ? (newDate[4] - 48) : 0) * 10) + (newDate[5] - 48);
+    uint32_t year = ((isAsciiNumber(newDate[9]) ? (newDate[9] - 48) : 0) * 10) + (newDate[10] - 48);
+    
+    //convert month
+    uint32_t month = 0;
     if(newDate[0] == 'J'){
         if(newDate[1] == 'a'){        //janurary
-            RTCDATEbits.MONTH01 = 1;
-            RTCDATEbits.MONTH10 = 0;
+            month = 1;
         }else if(newDate[3] == 'n'){  //june
-            RTCDATEbits.MONTH01 = 6; 
-            RTCDATEbits.MONTH10 = 0;
+            month = 6;
         }else{                        //july
-            RTCDATEbits.MONTH01 = 7;
-            RTCDATEbits.MONTH10 = 0;
+            month = 7;
         }
     }else if(newDate[0] == 'F'){      //feburary
-        RTCDATEbits.MONTH01 = 2;
-        RTCDATEbits.MONTH10 = 0;
+        month = 2;
     }else if(newDate[0] == 'M'){
         if(newDate[2] == 'r'){        //march
-            RTCDATEbits.MONTH01 = 5;
-            RTCDATEbits.MONTH10 = 0;
+            month = 3;
         }else{                        //may
-            RTCDATEbits.MONTH01 = 5;
-            RTCDATEbits.MONTH10 = 0;
+            month = 5;
         }
     }else if(newDate[0] == 'A'){
         if(newDate[1] == 'p'){        //April
-            RTCDATEbits.MONTH01 = 4;
-            RTCDATEbits.MONTH10 = 0;
+            month = 4;
         }else{                        //August
-            RTCDATEbits.MONTH01 = 8;
-            RTCDATEbits.MONTH10 = 0;
+            month = 8;
         }
     }else if(newDate[0] == 'S'){      //September
-        RTCDATEbits.MONTH01 = 9;
-        RTCDATEbits.MONTH10 = 0;    
+        month = 9;
     }else if(newDate[0] == 'O'){      //October
-        RTCDATEbits.MONTH01 = 0;
-        RTCDATEbits.MONTH10 = 1;
+        month = 10;
     }else if(newDate[0] == 'N'){      //November
-        RTCDATEbits.MONTH01 = 1;
-        RTCDATEbits.MONTH10 = 1;
+        month = 11;
     }else{                            //December
-        RTCDATEbits.MONTH01 = 2;
-        RTCDATEbits.MONTH10 = 1;
+        month = 12;
     }
-     
-    RTCDATEbits.DAY10 = newDate[4] - 48;
-    RTCDATEbits.DAY01 = newDate[5] - 48;
     
-    RTCDATEbits.YEAR10 = newDate[9] - 48;
-    RTCDATEbits.YEAR01 = newDate[10] - 48;
-    
-    int16_t day = RTCC_getDay();
-    int16_t month = RTCC_getMonth();
-    int16_t year = RTCC_getYear()+2000;
-    
-    RTCDATEbits.WDAY01 = (day += month < 3 ? year-- : year - 2, 23*month/9 + day + 4 + year/4- year/100 + year/400)%7;
-    
-    RTCC_lockRegisters();
-}    
+    info->tm_mday = day;
+    info->tm_mon = month - 1;
+    info->tm_year = year + 100;
+    info->tm_wday = (day += month < 3 ? year-- : year - 2, 23*month/9 + day + 4 + year/4- year/100 + year/400)%7;
+} 
 
-void RTCC_setDateTimeString(char* str, unsigned calibrate){
-    
-    RTCC_unlockRegisters();
-    
-    char * debug = str;
-    str = strchr(str, 'T');
-    *str = 0;
-    str++;
-    
-    //UART_sendString("Datestring: ", 0); UART_sendString(debug, 1);
-    //UART_sendString("Timestring: ", 0); UART_sendString(str, 1);
-    
-    RTCC_setDateStringNum(debug);
-    
-    RTCC_setTimeString(str, 1);
-    
-    int16_t day = RTCC_getDay();
-    int16_t month = RTCC_getMonth();
-    int16_t year = RTCC_getYear()+2000;
-    
-    RTCDATEbits.WDAY01 = (day += month < 3 ? year-- : year - 2, 23*month/9 + day + 4 + year/4- year/100 + year/400)%7;
-    
-    RTCC_lockRegisters();
+uint32_t RTCC_getLastCalDate(){
+    return RTCC_lastCalDate; 
 }
