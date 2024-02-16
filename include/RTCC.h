@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include <time.h>
 
+#define RTCC_ALARM_REPEAT_INDEFINETELY 0xffffffff
+
+typedef enum {RTCC_ARC_EVERY_HALF_SECOND = 0b0000, RTCC_ARC_EVERY_SECOND = 0b0001, RTCC_ARC_EVERY_10_SECONDS = 0b0010, RTCC_ARC_EVERY_MINUTE = 0b0011, RTCC_ARC_EVERY_10_MINUTES = 0b0100, RTCC_ARC_EVERY_HOUR = 0b0101, RTCC_ARC_ONCE_A_DAY = 0b0110, RTCC_ARC_ONCE_A_WEEK = 0b0111, RTCC_ARC_ONCE_A_MONTH = 0b1000, RTCC_ARC_ONCE_A_YEAR = 0b1001} RTCC_ALARM_REPEAT_CON_t;
+
 void RTCC_init(char * defaultTimeString, char * defaultDateString);
 uint32_t RTCC_getHours();
 uint32_t RTCC_getMinutes();
@@ -31,6 +35,11 @@ void RTCC_setTm(struct tm * info, uint32_t updateTime, uint32_t updateDate, unsi
 void RTCC_getTm(struct tm * info);
 
 uint32_t RTCC_getLastCalDate();
+
+
+void RTCC_setAlarmDate(uint8_t weekDay, uint8_t day, uint8_t month);
+void RTCC_setAlarmTime(uint32_t hours, uint32_t minutes, uint32_t seconds);
+void RTCC_setAlarmConfig(uint32_t alarmEnabled, uint32_t repeatCount, RTCC_ALARM_REPEAT_CON_t repeatConfig);
 
 /*void RTCC_setTimeString(char* newTime, unsigned calibrate);
 void RTCC_setDateStringNum(char* newDate);

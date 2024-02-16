@@ -2,6 +2,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
+#include <sys/attribs.h>
  
 #include "portmacro.h"
 #include "RTCC.h"
@@ -9,7 +10,8 @@
 #include "FreeRTOSConfig.h"
 #include "System.h"
 #include "util.h"
-#include "startup.h" 
+#include "startup.h"
+#include "AccelLogger.h" 
 
 
 #if __has_include("TTerm.h")
@@ -169,6 +171,98 @@ void RTCC_init(char * defaultTimeString, char * defaultDateString){
 #endif
 }
 
+void __ISR(_RTCC_VECTOR) RTCC_alarm(){
+    IFS0CLR = _IFS0_RTCCIF_MASK;
+    AL_isr(AL_RTCC_EVENT);
+}
+
+void RTCC_setAlarmConfig(uint32_t alarmEnabled, uint32_t repeatCount, RTCC_ALARM_REPEAT_CON_t repeatConfig){
+    //disable alarm during configuration
+    RTCALRM = 0;
+    
+    RTCALRMbits.CHIME = repeatCount == RTCC_ALARM_REPEAT_INDEFINETELY;
+    RTCALRMbits.ARPT = repeatCount;
+    
+    RTCALRMbits.AMASK = repeatConfig;
+    
+    RTCALRMbits.ALRMEN = alarmEnabled;
+    
+    //set IEC bits
+    IEC0bits.RTCCIE = alarmEnabled;
+    IPC6bits.RTCCIP = 3;
+}
+
+void RTCC_setAlarmTime(uint32_t hours, uint32_t minutes, uint32_t seconds){
+    if(hours > 23 || minutes > 59 || seconds > 59) return;
+    uint32_t alarmEnabled = RTCALRMbits.ALRMEN;
+    RTCALRMbits.ALRMEN = 0;
+    
+    //pre-calculate register value to prevent clocking during writing messing with us
+    union {
+        struct {
+            uint32_t :8;
+            uint32_t SEC01:4;
+            uint32_t SEC10:4;
+            uint32_t MIN01:4;
+            uint32_t MIN10:4;
+            uint32_t HR01:4;
+            uint32_t HR10:4;
+        };
+        struct {
+            uint32_t w:32;
+        };
+    } time;
+    
+    time.HR10 = hours / 10;
+    time.HR01 = hours % 10;
+    
+    time.MIN10 = minutes / 10;
+    time.MIN01 = minutes % 10;
+    
+    time.SEC10 = seconds / 10;
+    time.SEC01 = seconds % 10;
+    
+    //write value
+    RTCC_unlockRegisters();
+    ALRMTIME = time.w;
+    RTCC_lockRegisters();
+    
+    RTCALRMbits.ALRMEN = alarmEnabled;
+}
+
+void RTCC_setAlarmDate(uint8_t weekDay, uint8_t day, uint8_t month){//pre-calculate register value to prevent clocking during writing messing with us
+    if(day > 31 || month > 11) return;
+    uint32_t alarmEnabled = RTCALRMbits.ALRMEN;
+    RTCALRMbits.ALRMEN = 0;
+    
+    union {
+        struct {
+            uint32_t WDAY01:4;
+            uint32_t :4;
+            uint32_t DAY01:4;
+            uint32_t DAY10:4;
+            uint32_t MONTH01:4;
+            uint32_t MONTH10:4;
+        };
+        struct {
+            uint32_t w:32;
+        };
+    } date;
+    
+    date.MONTH10 = month / 10;
+    date.MONTH01 = month % 10;
+    
+    date.DAY10 = day / 10;
+    date.DAY01 = day % 10;
+    
+    date.WDAY01 = weekDay;
+    
+    RTCC_unlockRegisters();
+    ALRMDATE = date.w;
+    RTCC_lockRegisters();
+    
+    RTCALRMbits.ALRMEN = alarmEnabled;
+} 
 
 static ConMan_Result_t RTCC_configCallback(ConMan_Result_t evt, ConMan_CallbackData_t * data){
     ConMan_CallbackData_t * cbd = (ConMan_CallbackData_t *) data;
